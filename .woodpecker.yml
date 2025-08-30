@@ -1,0 +1,232 @@
+# .woodpecker.yml — Docker Hub + SHA + bump automático (com guard-clauses)
+
+steps:
+  install_and_test:
+    name: Install & Test
+    image: node:20
+    commands:
+      - npm ci
+      - npm run test -- --coverage
+    when:
+      branch: [main]
+      event: [push, manual]
+
+  upload_coverage_codecov:
+    name: Upload Coverage to Codecov
+    image: alpine:latest
+    environment:
+      CODECOV_TOKEN:
+        from_secret: CODECOV_TOKEN
+    commands:
+      - apk add --no-cache curl bash
+      - curl -Os https://uploader.codecov.io/latest/linux/codecov
+      - chmod +x codecov
+      - ./codecov --token "$CODECOV_TOKEN" --fail-under=60 --file=coverage/lcov.info
+    when:
+      branch: [main]
+      event: [push, manual]
+
+  docker_build_push:
+    name: Docker Build & Push (Docker Hub)
+    image: docker:24.0.7-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DOCKER_USER:
+        from_secret: DOCKER_USER
+      DOCKER_TOKEN:
+        from_secret: DOCKER_TOKEN
+    commands:
+      - set -eu
+      - echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
+      - docker build -t "wellrcosta/${CI_REPO_NAME}:latest" -t "wellrcosta/${CI_REPO_NAME}:${CI_COMMIT_SHA}" .
+      - docker push "wellrcosta/${CI_REPO_NAME}:latest"
+      - docker push "wellrcosta/${CI_REPO_NAME}:${CI_COMMIT_SHA}"
+      - echo "${CI_COMMIT_SHA}" > .tag_sha
+      - docker rmi "wellrcosta/${CI_REPO_NAME}:latest" || true
+      - docker rmi "wellrcosta/${CI_REPO_NAME}:${CI_COMMIT_SHA}" || true
+    when:
+      branch: [main]
+      event: [push, manual]
+
+  bump_tag_commit:
+    name: Bump tag in deploy.values.yaml
+    image: alpine:3.20
+    environment:
+      GITHUB_TOKEN:
+        from_secret: GITHUB_TOKEN # PAT com escopo "repo"
+    commands:
+      - set -eu
+      - apk add --no-cache git yq
+
+      # Configurar git
+      - git config --global user.email "ci@wellrcosta.dev"
+      - git config --global user.name "woodpecker-bot"
+      - git config --global --add safe.directory /woodpecker/src
+
+      # Verificar se deploy.values.yaml existe
+      - |
+        if [ ! -f deploy.values.yaml ]; then
+          echo "ERRO: deploy.values.yaml não encontrado na raiz do repositório" >&2
+          ls -la . # mostrar conteúdo para debug
+          exit 1
+        fi
+
+      # Atualizar arquivo usando CI_COMMIT_SHA diretamente (preservando formatação)
+      - |
+        echo "Atualizando tag para: ${CI_COMMIT_SHA}"
+        # Usar yq com --prettyPrint para preservar formatação
+        yq -i --prettyPrint ".tag = \"${CI_COMMIT_SHA}\"" deploy.values.yaml
+
+        # Verificar se houve mudanças
+        if git diff --quiet deploy.values.yaml; then
+          echo "Nenhuma mudança detectada no deploy.values.yaml"
+          exit 0
+        fi
+
+        echo "=== MUDANÇAS DETECTADAS ==="
+        git diff deploy.values.yaml
+        echo "=========================="
+
+        git add deploy.values.yaml
+        git commit -m "chore(ci): update image tag to ${CI_COMMIT_SHA}"
+
+      # Push para o repositório (com debug de permissões)
+      - |
+        echo "Configurando remote com token..."
+        echo "Repositório: $CI_REPO_OWNER/$CI_REPO_NAME"
+
+        # Testar diferentes formatos de autenticação
+        echo "=== TENTATIVA 1: x-access-token ==="
+        git remote set-url origin "https://x-access-token:$GITHUB_TOKEN@github.com/$CI_REPO_OWNER/$CI_REPO_NAME.git"
+        git push origin HEAD:main || {
+          echo "ERRO: x-access-token falhou"
+          
+          echo "=== TENTATIVA 2: username direto ==="
+          git remote set-url origin "https://$CI_REPO_OWNER:$GITHUB_TOKEN@github.com/$CI_REPO_OWNER/$CI_REPO_NAME.git"
+          git push origin HEAD:main || {
+            echo "ERRO: username direto falhou"
+            
+            echo "=== TENTATIVA 3: token como username ==="
+            git remote set-url origin "https://$GITHUB_TOKEN@github.com/$CI_REPO_OWNER/$CI_REPO_NAME.git"
+            git push origin HEAD:main || {
+              echo "ERRO: Todas as tentativas de autenticação falharam"
+              echo "Verifique se o token tem permissão de WRITE no repositório $CI_REPO_OWNER/$CI_REPO_NAME"
+              exit 1
+            }
+          }
+        }
+
+    when:
+      branch: [main]
+      event: [push, manual]
+
+  apply_secrets:
+    name: Apply Secrets to K8s
+    image: bitnami/kubectl:1.30
+    environment:
+      DOCKER_SERVER: https://index.docker.io/v1/
+      KUBE_NAMESPACE: local-services
+      KUBE_CONFIG:
+        from_secret: KUBE_CONFIG
+      DOCKER_USER:
+        from_secret: DOCKER_USER
+      DOCKER_TOKEN:
+        from_secret: DOCKER_TOKEN
+      ENV_VARS:
+        from_secret: ENV_VARS
+    commands:
+      - |
+        set -eu
+
+        # Inicializar variáveis
+        KUBE_NAMESPACE="${KUBE_NAMESPACE:-local-services}"
+        DOCKER_SERVER="${DOCKER_SERVER:-https://index.docker.io/v1/}"
+        APP_NAME="${APP_NAME:-$CI_REPO_NAME}"
+
+        export KUBE_NAMESPACE DOCKER_SERVER APP_NAME
+
+        echo "=== DEBUG ==="
+        echo "KUBE_NAMESPACE=$KUBE_NAMESPACE"
+        echo "APP_NAME=$APP_NAME" 
+        echo "DOCKER_SERVER=$DOCKER_SERVER"
+        echo "DOCKER_USER set? $([ -n "$DOCKER_USER" ] && echo yes || echo no)"
+        echo "DOCKER_TOKEN set? $([ -n "$DOCKER_TOKEN" ] && echo yes || echo no)"
+        echo "KUBE_CONFIG set? $([ -n "$KUBE_CONFIG" ] && echo yes || echo no)"
+        echo "ENV_VARS set? $([ -n "$ENV_VARS" ] && echo yes || echo no)"
+        echo "============="
+
+        # Guard para KUBE_CONFIG
+        if [ -z "$KUBE_CONFIG" ]; then
+          echo "KUBE_CONFIG ausente (defina no Woodpecker Secrets e marque Include secrets ao disparar manual)." >&2
+          exit 1
+        fi
+
+        # Configurar kubeconfig
+        mkdir -p "$HOME/.kube"
+        echo "$KUBE_CONFIG" > "$HOME/.kube/config"
+        chmod 600 "$HOME/.kube/config"
+
+        # Criar imagePullSecret se credenciais disponíveis
+        if [ -n "$DOCKER_USER" ] && [ -n "$DOCKER_TOKEN" ]; then
+          kubectl -n "$KUBE_NAMESPACE" create secret docker-registry registry-cred \
+            --docker-server="$DOCKER_SERVER" \
+            --docker-username="$DOCKER_USER" \
+            --docker-password="$DOCKER_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        else
+          echo "Aviso: DOCKER_USER/DOCKER_TOKEN não definidos — pulando registry-cred."
+        fi
+
+        # Gerar .env apenas se ENV_VARS estiver definido
+        ENVFILE="/tmp/.env.gen"
+        : > "$ENVFILE"
+
+        if [ -n "$ENV_VARS" ]; then
+          echo "=== ENV_VARS encontrado, processando... ==="
+          echo "Conteúdo: $ENV_VARS"
+          
+          # Converter formato VAR_1=valor1,VAR_2=valor2 para formato .env
+          echo "$ENV_VARS" | tr ',' '\n' > "$ENVFILE"
+          
+          echo "--- .env gerado ---"
+          cat "$ENVFILE" || true
+          echo "-------------------"
+        else
+          echo "ENV_VARS não definido - secret será criado vazio"
+        fi
+
+        # Criar secret da aplicação
+        SECRET_NAME="$CI_REPO_NAME-secrets"
+        echo "Criando secret: $SECRET_NAME"
+
+        if [ -s "$ENVFILE" ]; then
+          echo "Arquivo .env tem conteúdo - criando secret completo"
+          
+          # Criar secret com variáveis individuais
+          kubectl -n "$KUBE_NAMESPACE" create secret generic "$SECRET_NAME" \
+            --from-env-file="$ENVFILE" \
+            --dry-run=client -o yaml > /tmp/secret.yaml
+          
+          # Adicionar a key dotenv manualmente usando base64
+          echo "Adicionando key dotenv ao secret..."
+          DOTENV_B64=$(base64 -w 0 < "$ENVFILE")
+          
+          # Inserir a key dotenv no YAML antes da última linha (kind: Secret)
+          sed -i "/^data:/a\\  dotenv: $DOTENV_B64" /tmp/secret.yaml
+          
+          echo "Secret YAML final:"
+          cat /tmp/secret.yaml
+          
+          # Aplicar o secret
+          kubectl apply -f /tmp/secret.yaml
+        else
+          echo "Arquivo .env vazio - criando secret sem dados"
+          kubectl -n "$KUBE_NAMESPACE" create secret generic "$SECRET_NAME" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        fi
+          
+        echo "Secret $SECRET_NAME criado/atualizado com sucesso!"
+    when:
+      branch: [main]
+      event: [push, manual]

@@ -1,0 +1,30 @@
+# Node modules
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Coverage (gerado pelo Jest)
+coverage/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Dependências lock (opcional, se não quiser versionar)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# Build/artefatos temporários
+dist/
+build/
+tmp/
+*.swp
