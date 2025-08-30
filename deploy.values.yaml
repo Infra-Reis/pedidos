@@ -1,20 +1,16 @@
 name: pedidos
 namespace: local-services
-
 imageRepo: docker.io/wellrcosta/pedidos
-tag: 302c1fabc918e701ce87bf18bf1ac38fe7c6447b
+tag: 4a7dba350bb59a3e292032006e2d4b35cccb0d2c
 pullPolicy: IfNotPresent
 imagePullSecrets:
   - registry-cred
-
 replicas: 2
 port: 80
-
 expose: http
 host: pedidos.192.168.1.150.nip.io
 ingressClassName: traefik
 ingressAnnotations: {}
-
 resources:
   requests:
     cpu: 100m
@@ -22,20 +18,19 @@ resources:
   limits:
     cpu: 1000m
     memory: 512Mi
-
 readinessProbe:
   enabled: true
   path: /health
   initialDelaySeconds: 5
   periodSeconds: 10
-
 livenessProbe:
   enabled: true
   path: /health
   initialDelaySeconds: 15
   periodSeconds: 20
-
 cron:
   enabled: false
-  schedule: "*/5 * * * *"
-  command: ["node", "scripts/run-cron.js"]
+  schedule: '*/5 * * * *'
+  command:
+    - node
+    - scripts/run-cron.js
