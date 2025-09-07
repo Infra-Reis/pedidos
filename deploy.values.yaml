@@ -1,7 +1,7 @@
 name: pedidos
 namespace: local-services
 imageRepo: docker.io/wellrcosta/pedidos
-tag: 4a7dba350bb59a3e292032006e2d4b35cccb0d2c
+tag: 6ac0de5d6fed1f1c073ceecfc0c686f8117cf893
 pullPolicy: IfNotPresent
 imagePullSecrets:
   - registry-cred
