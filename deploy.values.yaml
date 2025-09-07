@@ -5,7 +5,7 @@ tag: 4a7dba350bb59a3e292032006e2d4b35cccb0d2c
 pullPolicy: IfNotPresent
 imagePullSecrets:
   - registry-cred
-replicas: 2
+replicas: 1
 port: 80
 expose: http
 host: pedidos.192.168.1.150.nip.io
